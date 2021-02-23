@@ -131,7 +131,7 @@ func New(opts Options) (io.Closer, error) {
 		return nil, fmt.Errorf("options Location1 cannot be the same as Location2")
 	}
 	glog.Infof("Monitoring homeseer at %s", opts.HostPort)
-	rval := &Monitor{
+	rval := &monitor{
 		opts:   opts,
 		close:  make(chan interface{}, 1),
 		ticker: maketicker(),
@@ -178,8 +178,8 @@ func New(opts Options) (io.Closer, error) {
 	return rval, nil
 }
 
-// Monitor monitors an instance of HS3.
-type Monitor struct {
+// monitor monitors an instance of HS3.
+type monitor struct {
 	ticker *time.Ticker
 	pulse  chan interface{}
 	close  chan interface{}
@@ -201,12 +201,12 @@ type Monitor struct {
 	amperes          *prometheus.GaugeVec
 }
 
-func (m *Monitor) start() {
+func (m *monitor) start() {
 	m.wg.Add(1)
 	go m.poll()
 }
 
-func (m *Monitor) poll() {
+func (m *monitor) poll() {
 	glog.Infof("polling started")
 	defer m.wg.Done()
 	if err := m.pollOnce(); err != nil {
@@ -231,7 +231,7 @@ func (m *Monitor) poll() {
 }
 
 // Close shuts down the monitor.
-func (m *Monitor) Close() error {
+func (m *monitor) Close() error {
 	glog.Info("bridge Monitor Close starting")
 	m.ticker.Stop()
 	m.close <- true
@@ -240,7 +240,7 @@ func (m *Monitor) Close() error {
 	return nil
 }
 
-func (m *Monitor) pollOnce() error {
+func (m *monitor) pollOnce() error {
 	st, err := devstatusget(m.opts.HostPort, m.opts.Username, m.opts.Password)
 	if err != nil {
 		return fmt.Errorf("devstatus.Get(%q, %q, elided): %v", m.opts.HostPort, m.opts.Username, err)

@@ -6,9 +6,6 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_model/go"
-
 	"github.com/jeffbstewart/homeseer_exporter/devstatus"
 )
 
@@ -43,7 +40,8 @@ func TestPoll(t *testing.T) {
 		gotErr = err
 	}
 	opts := Options{
-		OnError: onError,
+		OnError:   onError,
+		Namespace: t.Name(),
 		Location1: "Floor",
 		Location2: "Room",
 	}
@@ -59,24 +57,6 @@ func TestPoll(t *testing.T) {
 
 	if gotErr != nil {
 		t.Fatalf("gotErr: got %v, want nil", gotErr)
-	}
-
-	m := &io_prometheus_client.Metric{}
-	tg, err := temperature(opts)
-	if err != nil {
-		t.Fatalf("temperature: %v", err)
-	}
-	tm := tg.With(prometheus.Labels{
-		"floor":  "Ground Floor",
-		"room":   "Living Room",
-		"device": "Main Thermostat Temperature"})
-	if err := tm.Write(m); err != nil {
-		t.Fatalf("tm.Write: got %v, want nil error", err)
-	}
-	got := m.String()
-	want := `label:<name:"device" value:"Main Thermostat Temperature" > label:<name:"floor" value:"Ground Floor" > label:<name:"room" value:"Living Room" > gauge:<value:72 > `
-	if got != want {
-		t.Errorf("tm.Write: got %q, want %q", got, want)
 	}
 }
 
@@ -101,7 +81,11 @@ func TestPollFails(t *testing.T) {
 		gotErr = err
 	}
 	opts := Options{
-		OnError: onError,
+		OnError:   onError,
+		Namespace: t.Name(),
+		HostPort:  "1.2.3.4:80",
+		Username:  "Tim",
+		Password:  "What is your Quest?",
 		Location1: "l1",
 		Location2: "l2",
 	}
@@ -112,8 +96,8 @@ func TestPollFails(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Errorf("Close: %v", err)
 	}
-	wantErr := `devstatus.Get(""): gremlins`
+	wantErr := `devstatus.Get("1.2.3.4:80", "Tim", elided): gremlins`
 	if gotErr == nil || gotErr.Error() != wantErr {
-		t.Errorf("gotErr: got %v, want %q", gotErr, wantErr)
+		t.Errorf("gotErr: got\n%v, want\n%s", gotErr, wantErr)
 	}
 }
