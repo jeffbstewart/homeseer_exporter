@@ -4,7 +4,6 @@ package prometheusbridge
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -18,29 +17,41 @@ import (
 
 var (
 	devstatusget = devstatus.Get
-	maketicker   = func() *time.Ticker {
-		r := time.NewTicker(time.Minute)
-		return r
-	}
+	register     = prometheus.Register
 )
+
+func gaugeOpts(opts Options, name string, help string) prometheus.GaugeOpts {
+	return prometheus.GaugeOpts{
+		Namespace: opts.Namespace,
+		Subsystem: opts.Subsystem,
+		Name:      name,
+		Help:      help,
+	}
+}
 
 func newGaugeVec(opts Options, name string, help string) (*prometheus.GaugeVec, error) {
 	r := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Name:      name,
-			Help:      help,
-		},
+		gaugeOpts(opts, name, help),
 		[]string{
 			opts.Location2,
 			opts.Location1,
 			"device",
+			"parentDevice",
 		})
-	if err := prometheus.Register(r); err != nil {
+	if err := register(r); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+func now(opts Options) (prometheus.Gauge, error) {
+	r := prometheus.NewGauge(gaugeOpts(opts, "current_unix_time", "seconds elapsed since Jan 1, 1970 UTC"))
+	return r, register(r)
+}
+
+func lastUpdateUnixTime(opts Options) (*prometheus.GaugeVec, error) {
+	return newGaugeVec(opts, "last_update_unix_time",
+		"Seconds since Jan 1, 1970 UTC when this device last received an update")
 }
 
 func temperature(opts Options) (*prometheus.GaugeVec, error) {
@@ -92,10 +103,6 @@ func amperes(opts Options) (*prometheus.GaugeVec, error) {
 	return newGaugeVec(opts, "current_amperes", "Instantaneous electrical current")
 }
 
-func init() {
-	http.Handle("/metrics", promhttp.Handler())
-}
-
 // Options configures the exporter
 type Options struct {
 	// HostPort is the host:port of the homeseer 4 server.
@@ -123,7 +130,12 @@ type Options struct {
 // New creates and starts a monitor for the given target.
 // onError will be called if monitoring the target fails.
 // onError will be called only once.
-func New(opts Options) (io.Closer, error) {
+func New(opts Options) error {
+	_, err := internalNew(opts)
+	return err
+}
+
+func internalNew(opts Options) (*monitor, error) {
 	if opts.Username != "" && opts.Password == "" {
 		return nil, fmt.Errorf("when Username is provided you must also provide a password")
 	}
@@ -132,9 +144,9 @@ func New(opts Options) (io.Closer, error) {
 	}
 	glog.Infof("Monitoring homeseer at %s", opts.HostPort)
 	rval := &monitor{
-		opts:   opts,
-		close:  make(chan interface{}, 1),
-		ticker: maketicker(),
+		opts:        opts,
+		close:       make(chan interface{}, 1),
+		promHandler: promhttp.Handler(),
 	}
 
 	var err error
@@ -174,70 +186,51 @@ func New(opts Options) (io.Closer, error) {
 	if rval.amperes, err = amperes(opts); err != nil {
 		return nil, err
 	}
-	rval.start()
+	if rval.now, err = now(opts); err != nil {
+		return nil, err
+	}
+
+	if rval.lastUpdateUnixTime, err = lastUpdateUnixTime(opts); err != nil {
+		return nil, err
+	}
+	http.Handle("/", http.RedirectHandler("/metrics", 302))
+	http.Handle("/metrics", rval)
 	return rval, nil
 }
 
 // monitor monitors an instance of HS3.
 type monitor struct {
-	ticker *time.Ticker
-	pulse  chan interface{}
-	close  chan interface{}
-	wg     sync.WaitGroup
+	ticker      *time.Ticker
+	pulse       chan interface{}
+	close       chan interface{}
+	wg          sync.WaitGroup
+	promHandler http.Handler
 
 	opts Options
 
-	temperature      *prometheus.GaugeVec
-	relativeHumidity *prometheus.GaugeVec
-	luminance        *prometheus.GaugeVec
-	battery          *prometheus.GaugeVec
-	watts            *prometheus.GaugeVec
-	kwhours          *prometheus.GaugeVec
-	ultraviolet      *prometheus.GaugeVec
-	sensorBinary     *prometheus.GaugeVec
-	switchBinary     *prometheus.GaugeVec
-	switchMultilevel *prometheus.GaugeVec
-	volts            *prometheus.GaugeVec
-	amperes          *prometheus.GaugeVec
+	temperature        *prometheus.GaugeVec
+	relativeHumidity   *prometheus.GaugeVec
+	luminance          *prometheus.GaugeVec
+	battery            *prometheus.GaugeVec
+	watts              *prometheus.GaugeVec
+	kwhours            *prometheus.GaugeVec
+	ultraviolet        *prometheus.GaugeVec
+	sensorBinary       *prometheus.GaugeVec
+	switchBinary       *prometheus.GaugeVec
+	switchMultilevel   *prometheus.GaugeVec
+	volts              *prometheus.GaugeVec
+	amperes            *prometheus.GaugeVec
+	now                prometheus.Gauge
+	lastUpdateUnixTime *prometheus.GaugeVec
 }
 
-func (m *monitor) start() {
-	m.wg.Add(1)
-	go m.poll()
-}
-
-func (m *monitor) poll() {
-	glog.Infof("polling started")
-	defer m.wg.Done()
+func (m *monitor) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if err := m.pollOnce(); err != nil {
 		glog.Errorf("pollOnce(): %v", err)
-		m.opts.OnError(err)
+		rw.WriteHeader(500)
 		return
 	}
-	for {
-		select {
-		case <-m.close:
-			glog.Infof("polling loop exiting")
-			return
-		case <-m.ticker.C:
-			glog.Infof("pollOnce")
-			if err := m.pollOnce(); err != nil {
-				glog.Errorf("pollOnce(): %v", err)
-				m.opts.OnError(err)
-				return
-			}
-		}
-	}
-}
-
-// Close shuts down the monitor.
-func (m *monitor) Close() error {
-	glog.Info("bridge Monitor Close starting")
-	m.ticker.Stop()
-	m.close <- true
-	m.wg.Wait()
-	glog.Info("bridge Monitor Close done")
-	return nil
+	m.promHandler.ServeHTTP(rw, req)
 }
 
 func (m *monitor) pollOnce() error {
@@ -245,6 +238,7 @@ func (m *monitor) pollOnce() error {
 	if err != nil {
 		return fmt.Errorf("devstatus.Get(%q, %q, elided): %v", m.opts.HostPort, m.opts.Username, err)
 	}
+	m.now.Set(float64(time.Now().Unix()))
 	want := map[string]*prometheus.GaugeVec{
 		"Z-Wave Temperature":       m.temperature,
 		"Z-Wave Relative Humidity": m.relativeHumidity,
@@ -266,8 +260,15 @@ func (m *monitor) pollOnce() error {
 
 		// TODO: Nest special handling
 	}
+	now := time.Now()
+	m.now.Set(float64(now.Unix()))
+	deviceNames := make(map[int]string)
+	for _, d := range st.Devices {
+		deviceNames[d.Reference] = d.Name
+	}
 	for _, d := range st.Devices {
 		device := ""
+		parent := ""
 		if got, ok := want[d.DeviceType]; ok {
 			if d.DeviceType == "Z-Wave Switch Binary" || d.DeviceType == "Z-Wave Switch" {
 				// convert 0/255 to 0/1
@@ -276,10 +277,17 @@ func (m *monitor) pollOnce() error {
 				}
 			}
 			device = d.Name
-			got.With(prometheus.Labels{
+			if len(d.AssociatedDevices) == 1 {
+				parent = deviceNames[d.AssociatedDevices[0]]
+			}
+			labels := prometheus.Labels{
 				m.opts.Location2: d.Location2,
 				m.opts.Location1: d.Location,
-				"device":         device}).Set(d.Value)
+				"device":         device,
+				"parentDevice":   parent,
+			}
+			got.With(labels).Set(d.Value)
+			m.lastUpdateUnixTime.With(labels).Set(float64(d.LastChange.Unix()))
 		}
 	}
 	return nil

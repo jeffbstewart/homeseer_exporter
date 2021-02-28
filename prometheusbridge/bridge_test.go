@@ -2,18 +2,14 @@ package prometheusbridge
 
 import (
 	"errors"
-	"testing"
-	"time"
-
-	"github.com/golang/glog"
 	"github.com/jeffbstewart/homeseer_exporter/devstatus"
+	"testing"
 )
 
 func TestPoll(t *testing.T) {
-	save, savet := devstatusget, maketicker
+	save := devstatusget
 	defer func() {
 		devstatusget = save
-		maketicker = savet
 	}()
 	devstatusget = func(hostPort string, user string, pass string) (*devstatus.StatusReport, error) {
 		return &devstatus.StatusReport{
@@ -28,13 +24,6 @@ func TestPoll(t *testing.T) {
 			},
 		}, nil
 	}
-	ch := make(chan time.Time)
-	ti := &time.Ticker{
-		C: ch,
-	}
-	maketicker = func() *time.Ticker {
-		return ti
-	}
 	var gotErr error
 	onError := func(err error) {
 		gotErr = err
@@ -45,36 +34,23 @@ func TestPoll(t *testing.T) {
 		Location1: "Floor",
 		Location2: "Room",
 	}
-	c, err := New(opts)
+	mon, err := internalNew(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	glog.Info("Forcing a poll now")
-	ch <- time.Now()
-	if err := c.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-
+	_ = mon.pollOnce()
 	if gotErr != nil {
 		t.Fatalf("gotErr: got %v, want nil", gotErr)
 	}
 }
 
 func TestPollFails(t *testing.T) {
-	save, savet := devstatusget, maketicker
+	save := devstatusget
 	defer func() {
 		devstatusget = save
-		maketicker = savet
 	}()
 	devstatusget = func(hostPort string, user string, pass string) (*devstatus.StatusReport, error) {
 		return nil, errors.New("gremlins")
-	}
-	ch := make(chan time.Time)
-	ti := &time.Ticker{
-		C: ch,
-	}
-	maketicker = func() *time.Ticker {
-		return ti
 	}
 	var gotErr error
 	onError := func(err error) {
@@ -89,13 +65,11 @@ func TestPollFails(t *testing.T) {
 		Location1: "l1",
 		Location2: "l2",
 	}
-	c, err := New(opts)
+	mon, err := internalNew(opts)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
-	if err := c.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
+	_ = mon.pollOnce()
 	wantErr := `devstatus.Get("1.2.3.4:80", "Tim", elided): gremlins`
 	if gotErr == nil || gotErr.Error() != wantErr {
 		t.Errorf("gotErr: got\n%v, want\n%s", gotErr, wantErr)
