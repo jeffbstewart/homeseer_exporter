@@ -18,6 +18,7 @@ import (
 var (
 	devstatusget = devstatus.Get
 	register     = prometheus.Register
+	handle       = http.Handle
 )
 
 func gaugeOpts(opts Options, name string, help string) prometheus.GaugeOpts {
@@ -193,8 +194,8 @@ func internalNew(opts Options) (*monitor, error) {
 	if rval.lastUpdateUnixTime, err = lastUpdateUnixTime(opts); err != nil {
 		return nil, err
 	}
-	http.Handle("/", http.RedirectHandler("/metrics", 302))
-	http.Handle("/metrics", rval)
+	handle("/", http.RedirectHandler("/metrics", 302))
+	handle("/metrics", rval)
 	return rval, nil
 }
 
@@ -269,7 +270,12 @@ func (m *monitor) pollOnce() error {
 	for _, d := range st.Devices {
 		device := ""
 		parent := ""
-		if got, ok := want[d.DeviceType]; ok {
+		t := d.DeviceType
+		if t == "Z-Wave Electric Meter" {
+			t = "Z-Wave " + d.Name
+		}
+
+		if got, ok := want[t]; ok {
 			if d.DeviceType == "Z-Wave Switch Binary" || d.DeviceType == "Z-Wave Switch" {
 				// convert 0/255 to 0/1
 				if d.Value != 0 {
